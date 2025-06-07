@@ -1,0 +1,30 @@
+[project]
+name = "livekit-plugins-dify-workflow"
+version = "0.1.0"
+description = "LiveKit plugin for Dify Workflows"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Apache-2.0"}
+authors = [
+    { name = "xhc", email = "cncnxuboot@163.com" }
+]
+dependencies = [
+    "livekit-agents >= 0.6.0", # Adjust version as needed
+    "aiohttp >= 3.8.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["livekit.plugins.dify"]
+
+[tool.setuptools.package-data]
+"livekit.plugins.dify" = ["py.typed"]
+
+[project.entry-points."livekit.agents.plugin"]
+dify_workflow = "livekit.plugins.dify.llm:DifyWorkflowLLM"

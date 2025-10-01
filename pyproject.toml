@@ -9,7 +9,7 @@ authors = [
     { name = "xhc", email = "cncnxuboot@163.com" }
 ]
 dependencies = [
-    "livekit-agents >= 0.6.0", # Adjust version as needed
+    "livekit-agents >= 1.0.23",  # 匹配兼容版本
     "aiohttp >= 3.8.0"
 ]
 

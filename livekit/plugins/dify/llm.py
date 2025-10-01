@@ -8,25 +8,36 @@ LiveKit与Dify工作流的集成插件
 作者: xch
 日期: 2025-6-5
 """
+# -*- coding: utf-8 -*-
+"""
+LiveKit与Dify工作流的集成插件
+
+该模块实现了LiveKit Agents框架与Dify工作流API的无缝集成，
+支持流式输出和全部Dify工作流事件处理。
+"""
 
 import json
 import os
 import uuid
 from dataclasses import dataclass
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, AsyncIterator
 import aiohttp
+import asyncio
 
 from livekit.agents import llm, utils
 from livekit.agents.llm import (
     ChatContext,
     ChatMessage,
     LLMStream,
+    ChatChunk,
+    ChoiceDelta
 )
-from livekit.agents import APIConnectionError, APIStatusError 
+from livekit.agents import APIConnectionError, APIStatusError
 
 
-DEFAULT_DIFY_API_BASE = "https://api.dify.ai/v1" 
-DEFAULT_DIFY_WORKFLOW_ENDPOINT = "/chat-messages" 
+DEFAULT_DIFY_API_BASE = "https://api.dify.ai/v1"
+DEFAULT_DIFY_WORKFLOW_ENDPOINT = "/chat-messages"
+
 
 @dataclass
 class DifyWorkflowLLMOptions:
@@ -43,26 +54,23 @@ class DifyWorkflowLLMOptions:
 
     def __post_init__(self):
         """初始化后处理配置参数，处理环境变量和默认值"""
-       
         if self.api_key is None:
             self.api_key = os.environ.get("DIFY_API_KEY")
         
-    
         if not self.api_key:
             raise ValueError("Dify API密钥是必需的，并且在选项或DIFY_API_KEY环境变量中未找到。")
         
-   
         self.api_base = self.api_base or os.environ.get("DIFY_API_BASE", DEFAULT_DIFY_API_BASE)
         self.user = self.user or os.environ.get("DIFY_USER", "livekit_user")  # 用户ID默认值
         self.workflow_api_endpoint = self.workflow_api_endpoint or DEFAULT_DIFY_WORKFLOW_ENDPOINT
 
     def get_headers(self) -> Dict[str, str]:
         """生成API请求所需的HTTP头信息"""
-        # 注意这里使用Bearer认证
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+
 
 class DifyWorkflowLLMStream(llm.LLMStream):
     def __init__(
@@ -74,8 +82,6 @@ class DifyWorkflowLLMStream(llm.LLMStream):
     ):
         from livekit.agents.llm import ChatContext
         empty_chat_ctx = ChatContext()
-        
-        from dataclasses import dataclass
         
         @dataclass
         class ConnectionOptions:
@@ -126,24 +132,20 @@ class DifyWorkflowLLMStream(llm.LLMStream):
                     if event_type == "message":
                         answer = event_data.get("answer")
                         if answer:
-                            from livekit.agents.llm import ChoiceDelta
-                            chunk = llm.ChatChunk(
+                            chunk = ChatChunk(
                                 id=str(uuid.uuid4()),
                                 delta=ChoiceDelta(content=str(answer), role='assistant')
                             )
                             await self._event_ch.send(chunk)
                     elif event_type == "workflow_started":
                         self._llm.logger.info(f"Dify Workflow Started: {event_data.get('task_id')}, Run ID: {event_data.get('workflow_run_id')}")
-
                     elif event_type == "node_started":
                         node_data = event_data.get("data", {})
                         self._llm.logger.debug(f"Dify Node Started: {node_data.get('title')} ({node_data.get('node_id')})")
-
                     elif event_type == "node_finished":
                         node_data = event_data.get("data", {})
                         node_status = node_data.get("status")
                         self._llm.logger.debug(f"Dify Node Finished: {node_data.get('title')} ({node_data.get('node_id')}), Status: {node_status}")
-
                     elif event_type == "workflow_finished":
                         self._llm.logger.info(f"Dify Workflow Finished: {event_data.get('task_id')}, Run ID: {event_data.get('workflow_run_id')}")
                         workflow_data = event_data.get("data", {})
@@ -152,8 +154,7 @@ class DifyWorkflowLLMStream(llm.LLMStream):
 
                         if status == "succeeded":
                             self._finish_reason = "stop"
-                            from livekit.agents.llm import ChoiceDelta
-                            await self._event_ch.send(llm.ChatChunk(
+                            await self._event_ch.send(ChatChunk(
                                 id=str(uuid.uuid4()),
                                 delta=ChoiceDelta(content="", role='assistant')
                             ))
@@ -167,7 +168,6 @@ class DifyWorkflowLLMStream(llm.LLMStream):
                             self._llm.logger.warning(workflow_failed_error_message)
                             self._finish_reason = "error"
                             raise Exception(f"Dify Workflow Unexpected Status: {status}")
-
                     elif event_type == "message_end":
                         self._llm.logger.debug(f"Dify Message End: {event_data.get('message_id')}")
                         if not final_usage_data:
@@ -176,13 +176,11 @@ class DifyWorkflowLLMStream(llm.LLMStream):
                             final_metadata = event_data.get("metadata")
                         
                         if self._finish_reason is None:
-                             self._finish_reason = "stop"
-                             from livekit.agents.llm import ChoiceDelta
-                             await self._event_ch.send(llm.ChatChunk(
-                                 id=str(uuid.uuid4()),
-                                 delta=ChoiceDelta(content="", role='assistant')
-                             ))
-
+                            self._finish_reason = "stop"
+                            await self._event_ch.send(ChatChunk(
+                                id=str(uuid.uuid4()),
+                                delta=ChoiceDelta(content="", role='assistant')
+                            ))
                     elif event_type == "error":
                         error_msg = event_data.get("message", "Dify流返回了未指定的错误")
                         status_code = event_data.get("status")
@@ -214,94 +212,74 @@ class DifyWorkflowLLMStream(llm.LLMStream):
             self._llm.logger.debug(f"Received Dify usage data: {usage_data}")
         return None
 
+
 class DifyWorkflowLLM(llm.LLM):
-    def __init__(self, options: DifyWorkflowLLMOptions, **kwargs):
+    def __init__(self, options: DifyWorkflowLLMOptions, **kwargs: Any):
         super().__init__()
         self._opts = options
         self._session: Optional[aiohttp.ClientSession] = None
-        
-        import logging
-        self.logger = logging.getLogger("dify_workflow_llm")
-        
-        self.logger.info(f"DifyWorkflowLLM initialized with options: api_base='{options.api_base}', user='{options.user}'")
-
-    async def _ensure_session(self) -> aiohttp.ClientSession:
-        if self._opts.http_session and not self._opts.http_session.closed:
-            self.logger.debug("Using provided http_session") 
-            return self._opts.http_session
-        
-        if self._session and not self._session.closed:
-            return self._session
-            
-        # 直接创建新的ClientSession并禁用SSL验证
-        self._session = aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(ssl=False)
-        )
-        self.logger.debug("Created new aiohttp.ClientSession with SSL verification disabled")
-        return self._session
-
-    async def close(self):
-        self._session = None
+        self.logger = llm.get_logger("dify_workflow_llm")
 
     async def run_workflow(
         self,
-        *, 
-        workflow_inputs: Dict[str, Any],
+        workflow_inputs: Optional[Dict[str, Any]] = None,
         user_query: Optional[str] = None,
         stream: bool = True,
-        **kwargs: Any
+        conversation_id: Optional[str] = None,** kwargs: Any,
     ) -> DifyWorkflowLLMStream:
-        session = await self._ensure_session()
-
+        """调用Dify工作流API，返回流式响应"""
+        self._session = self._opts.http_session or aiohttp.ClientSession()
+        
+        url = f"{self._opts.api_base}{self._opts.workflow_api_endpoint}"
         payload = {
-            "inputs": workflow_inputs,
+            "inputs": workflow_inputs or {},
+            "query": user_query,
             "user": self._opts.user,
-            "response_mode": "streaming" if stream else "blocking",
+            "stream": stream,
+            "conversation_id": conversation_id or str(uuid.uuid4()),
         }
-        if user_query:
-            payload["query"] = user_query
-
-        api_url = f"{self._opts.api_base.rstrip('/')}/{self._opts.workflow_api_endpoint.lstrip('/')}"
+        payload.update(kwargs)
 
         try:
-            response = await session.post(
-                api_url,
+            response = await self._session.post(
+                url,
                 headers=self._opts.get_headers(),
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=600),
-                ssl=False  # 禁用SSL验证以解决SSL连接问题
+                timeout=aiohttp.ClientTimeout(total=300),
             )
             response.raise_for_status()
 
-        except aiohttp.ClientResponseError as e:
-            raise APIStatusError(f"Dify Workflow API 错误: {e.status} {e.message}") from e
-        except Exception as e:
-            raise APIConnectionError(f"连接 Dify Workflow API 失败: {e}") from e
+            return DifyWorkflowLLMStream(
+                llm_instance=self,
+                dify_stream=response,
+                workflow_inputs=workflow_inputs or {},
+                user_query=user_query,
+            )
+        except aiohttp.ClientError as e:
+            self.logger.error(f"Dify API请求失败: {e}")
+            raise APIConnectionError(f"无法连接到Dify API: {e}") from e
 
-        return DifyWorkflowLLMStream(
-            llm_instance=self,
-            dify_stream=response,
-            workflow_inputs=workflow_inputs,
+    async def chat(
+        self,
+        chat_ctx: ChatContext,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatChunk]:
+        """实现LLM接口的chat方法，通过工作流处理对话上下文"""
+        user_query = None
+        if chat_ctx.messages:
+            last_msg = chat_ctx.messages[-1]
+            if last_msg.role == "user" and last_msg.content:
+                user_query = last_msg.content
+
+        stream = await self.run_workflow(
             user_query=user_query,
+            stream=True,** kwargs
         )
-
-    async def chat(self, chat_ctx: llm.ChatContext, **kwargs) -> DifyWorkflowLLMStream:
-        if not chat_ctx.messages:
-            raise ValueError("ChatContext必须至少包含一条消息。")
-
-        last_message = chat_ctx.messages[-1]
-        user_query = ""
-        if last_message.content:
-            if isinstance(last_message.content, str):
-                user_query = last_message.content
-            elif isinstance(last_message.content, list) and last_message.content:
-                user_query = str(last_message.content[0])
         
-        workflow_inputs = kwargs.pop("workflow_inputs", {})
+        async for chunk in stream:
+            yield chunk
 
-        return await self.run_workflow(
-            workflow_inputs=workflow_inputs, 
-            user_query=user_query,
-            stream=kwargs.get("stream", True), 
-            **kwargs
-        )
+    async def close(self) -> None:
+        """关闭HTTP会话释放资源"""
+        if self._session and not self._session.closed:
+            await self._session.close()
